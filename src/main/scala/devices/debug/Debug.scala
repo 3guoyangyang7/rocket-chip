@@ -3,6 +3,7 @@
 package freechips.rocketchip.devices.debug
 
 import Chisel._
+import chisel3.experimental._
 import freechips.rocketchip.config._
 import freechips.rocketchip.diplomacy._
 import freechips.rocketchip.regmapper._
@@ -99,6 +100,7 @@ case class DebugModuleParams (
   nAbstractDataWords : Int = 4,
   nScratch : Int = 1,
   hasBusMaster : Boolean = false,
+  clockGate : Boolean = true,
   maxSupportedSBAccess : Int = 32,
   supportQuickAccess : Boolean = false,
   supportHartArray   : Boolean = false,
@@ -1068,9 +1070,22 @@ class TLDebugModuleInnerAsync(device: Device, getNComponents: () => Int, beatByt
       val psd = new PSDTestMode().asInput
     })
 
-    dmInner.module.io.innerCtrl := FromAsyncBundle(io.innerCtrl)
-    dmInner.module.io.dmactive := ~ResetCatchAndSync(clock, ~io.dmactive, "dmactiveSync", io.psd)
-    dmInner.module.io.debugUnavail := io.debugUnavail
+    val dmactive = ~ResetCatchAndSync(clock, ~io.dmactive, "dmactiveSync", io.psd)
+    // Need to clock DM during reset because of synchronous reset, but
+    // register the reset signal to obviate a critical path
+    val clock_en = dmactive || RegNext(reset)
+    val gated_clock =
+      if (!p(DebugModuleParams).clockGate) clock
+      else ClockGate(clock, clock_en, "debug_clock_gate")
+
+    // Keep the async-crossing sink in the gated-clock domain, both to save
+    // power and also for the sake of the ready-valid handshake with dmInner
+    withClock (gated_clock) {
+      dmInner.module.clock := gated_clock
+      dmInner.module.io.dmactive := dmactive
+      dmInner.module.io.innerCtrl := FromAsyncBundle(io.innerCtrl)
+      dmInner.module.io.debugUnavail := io.debugUnavail
+    }
   }
 }
 
